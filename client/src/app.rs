@@ -1,7 +1,6 @@
 use crate::graphic;
 use crate::graphic::ui::GUIWrapper;
 use crate::graphic::FrameRenderer;
-use crate::networking::ClientNetworkHandler;
 use egui_winit::winit::event::{DeviceEvent, ElementState, Event, MouseScrollDelta, RawKeyEvent, WindowEvent};
 use egui_winit::winit::event_loop::{EventLoop, EventLoopWindowTarget};
 use egui_winit::winit::keyboard::{KeyCode, PhysicalKey};
@@ -12,7 +11,7 @@ use math::{DVec3, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::time::{Duration, Instant};
 use world_core::{Chunk, ChunkManager, MEMORY_MANAGER};
-use rand::Rng;
+use rand::random;
 
 fn main_menu(gui_wrapper: &mut GUIWrapper<GUIData>, ctx: &egui::Context, data: &mut GUIData) {
     egui::Window::new("Tool box").show(ctx, |ui| {
@@ -178,7 +177,6 @@ impl CameraController {
 pub struct App {
     window: graphic::Window,
     graphic_context: graphic::Context,
-    client_network_handler: Option<ClientNetworkHandler>,
     last_update: Instant,
     gui_handler: graphic::ui::GuiHandler<GUIData>,
     camera: graphic::camera::Camera,
@@ -240,7 +238,7 @@ impl App {
         //todo: move this to a better place, when the network will be implemented
         let mut chunk_manager = ChunkManager::new();
 
-        let seed = rand::thread_rng().gen();
+        let seed = random();
         let mut generator = Generator::new("crates/gen/build/libs/generator-1.0.0.jar", seed)?;
 
         Self::regenerate_cube(&mut chunk_manager, &mut generator);
@@ -252,7 +250,6 @@ impl App {
             Self {
                 window,
                 graphic_context,
-                client_network_handler: None,
                 last_update: Instant::now(),
                 gui_handler,
                 camera,
@@ -306,18 +303,9 @@ impl App {
 
     fn exit(&mut self) {
         println!("exiting");
-        if self.client_network_handler.is_some() {
-            self.client_network_handler.as_mut().unwrap().exit();
-        }
     }
 
     fn tick(&mut self, delta_time: Duration) -> anyhow::Result<()> {
-        if self.client_network_handler.is_some() {
-            self.client_network_handler
-                .as_mut()
-                .unwrap()
-                .tick(delta_time)?;
-        }
 
         let mut gui_data = GUIData {
             second_per_frame: delta_time.as_secs_f32(),

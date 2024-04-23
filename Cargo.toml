@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "server",
     "client",
-    "crates/networking",
     "crates/world_core",
     "crates/math",
     "crates/utils",

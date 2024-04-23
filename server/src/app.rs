@@ -1,79 +1,46 @@
-use crate::networking;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{atomic, Arc};
-use std::time::Instant;
-use std::{thread, time::Duration};
+use tokio::signal;
 
 pub struct App {
-    should_exit: Arc<atomic::AtomicBool>,
-    network_manager: networking::ServerNetworkHandler,
+    date: u64,
 }
 
 impl App {
     pub fn new() -> anyhow::Result<Self> {
-        // todo: do not hardcode the config
-        let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5000);
-        let network_manager = networking::ServerNetworkHandler::new(socket_addr)?;
-
         Ok(Self {
-            should_exit: Arc::new(atomic::AtomicBool::new(false)),
-            network_manager,
+            date: 0,
         })
     }
 
-    fn should_exit(&self) -> bool {
-        !self.should_exit.load(atomic::Ordering::SeqCst)
+
+    pub async fn run(&mut self) -> anyhow::Result<()> {
+        self.starting().await?;
+        return tokio::select! {
+            result = self.running() => result,
+            result = signal::ctrl_c() => {
+                println!("shutting down server");
+                result.map_err(|e| anyhow::anyhow!("error: {:?}", e))
+            },
+        };
     }
 
-    pub fn run(&mut self) -> anyhow::Result<()> {
-        self.starting()?;
-        self.running()?;
-        self.exiting()?;
-        Ok(())
-    }
-
-    fn starting(&mut self) -> anyhow::Result<()> {
+    async fn starting(&mut self) -> anyhow::Result<()> {
         println!("starting server");
-        let atomic_ref = self.should_exit.clone();
-        ctrlc::set_handler(move || {
-            atomic_ref.store(true, atomic::Ordering::SeqCst);
-        })?;
         Ok(())
     }
 
-    fn running(&mut self) -> anyhow::Result<()> {
-        println!("server running");
-        let mut last_updated = Instant::now();
-        //main loop
-        while self.should_exit() {
-            let now = Instant::now();
-            let delta_time = now - last_updated;
-            last_updated = now;
+    async fn running(&mut self) -> anyhow::Result<()> {
+        let duration = std::time::Duration::from_millis(50); // 20 Hz
+        let mut interval = tokio::time::interval(duration);
 
-            //delta_time should be 50ms, if it's not, we're lagging
-            self.tick(delta_time)?;
-
-            //sleep to complete the 50ms
-            let time_took = now.elapsed();
-            if time_took > Duration::from_millis(50) {
-                println!("server is lagging");
-            } else {
-                let time_to_sleep = Duration::from_millis(50) - time_took;
-                thread::sleep(time_to_sleep);
-            }
+        loop {
+            interval.tick().await;
+            self.date += 1;
+            self.tick().await?;
         }
-
-        Ok(())
     }
 
-    fn exiting(&mut self) -> anyhow::Result<()> {
-        println!("stopping server");
-        self.network_manager.exit();
-        Ok(())
-    }
-
-    pub fn tick(&mut self, delta_time: Duration) -> anyhow::Result<()> {
-        self.network_manager.tick(delta_time)?;
+    pub async fn tick(&mut self) -> anyhow::Result<()> {
+        println!("tick {}", self.date);
         Ok(())
     }
 }
