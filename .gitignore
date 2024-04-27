@@ -3,3 +3,4 @@
 flamegraph.svg
 /crates/gen/build
 .gradle
+config.toml

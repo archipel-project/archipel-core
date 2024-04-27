@@ -1,8 +1,8 @@
-mod app;
+mod server_shell;
+mod logical_server;
+use server_shell::ServerShell;
 
-use app::App;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    App::new()?.run().await
+fn main() -> anyhow::Result<()> {
+    ServerShell::init()?.run()
 }
