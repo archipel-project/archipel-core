@@ -8,6 +8,6 @@ edition = "2021"
 [dependencies]
 shared_arena = "0.8.4"
 memory-stats = "1.0.0"
-ctor = { version = "0.2.6", features = [] }
-math = { path = "../math" }
-utils = { path = "../utils" }
+ctor.workspace = true
+math.workspace = true
+utils.workspace = true

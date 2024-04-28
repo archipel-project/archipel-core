@@ -1,7 +1,10 @@
 mod config;
 
+use std::net::SocketAddr;
 use tokio::io::AsyncBufReadExt;
 use tokio::signal;
+use tracing::trace;
+use networking::ConnectionMode;
 use crate::logical_server;
 use crate::logical_server::GameServer;
 
@@ -13,7 +16,6 @@ use crate::logical_server::GameServer;
 pub struct ServerShell {
     config: config::Config,
     tokio: tokio::runtime::Runtime,
-    logical_server: GameServer,
 }
 
 impl ServerShell {
@@ -27,11 +29,10 @@ impl ServerShell {
         tokio_builder .enable_all();
 
         if let Some(threads) = config.runtime_config.tokio_threads {
-            tokio_builder.worker_threads(threads.get() as usize);
+            tokio_builder.worker_threads(threads.get());
         }
 
         let tokio = tokio_builder.build()?;
-
 
         // tracing
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -45,7 +46,6 @@ impl ServerShell {
         Ok(Self {
             config,
             tokio,
-            logical_server: GameServer::new(),
         })
     }
 
@@ -73,10 +73,22 @@ impl ServerShell {
 
         self.starting()?;
 
+        let network_config = networking::NetworkSettings {
+            compression_threshold: None,
+            callbacks: Default::default(),
+            tokio_handle: None,
+            address:  "0.0.0.0:25565".parse::<SocketAddr>()?,
+            connection_mode: ConnectionMode::Offline,
+            ..Default::default()
+        };
+
+        let new_connections = networking::build_plugin(network_config, &self.tokio)?;
+        let mut logical_server = GameServer::new(new_connections);
+
         let task = async {
 
             tokio::select! {
-                result = Self::game_loop(&mut self.logical_server) => result,
+                result = Self::game_loop(logical_server) => result,
                 result = signal::ctrl_c() => {
                     tracing::info!("shutting down server");
                     result.map_err(|e| anyhow::anyhow!("error: {:?}", e))
@@ -93,10 +105,9 @@ impl ServerShell {
         Ok(())
     }
 
-    async fn game_loop(game_server: &mut GameServer) -> anyhow::Result<()> {
+    async fn game_loop(mut game_server: GameServer) -> anyhow::Result<()> {
         let duration = std::time::Duration::from_millis(50); // 20 Hz
         let mut interval = tokio::time::interval(duration);
-        interval.missed_tick_behavior();
 
         let mut tick_date = 0u64;
         loop {

@@ -7,4 +7,4 @@ edition = "2021"
 anyhow = "1.0.80"
 zip = "0.6.6"
 jni = { version = "0.21.1", features = ["invocation"] }
-ctor = "0.2.7"
+ctor.workspace = true

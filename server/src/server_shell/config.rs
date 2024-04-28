@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -11,13 +11,13 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     /// The number of threads to use for the IO pool.
-    pub tokio_threads: Option<NonZeroU32>,
+    pub tokio_threads: Option<NonZeroUsize>,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            tokio_threads: Some(NonZeroU32::new(4).unwrap()),
+            tokio_threads: NonZeroUsize::new(4),
         }
     }
 }
