@@ -115,7 +115,6 @@ pub(crate) async fn try_handle_legacy_ping(
     };
 
     if let ServerListLegacyPing::Respond(mut response) = shared
-        .0
         .callbacks
         .inner
         .server_list_legacy_ping(shared, remote_addr, payload)

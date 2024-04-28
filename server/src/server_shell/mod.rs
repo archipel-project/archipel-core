@@ -1,11 +1,8 @@
 mod config;
 
 use std::net::SocketAddr;
-use tokio::io::AsyncBufReadExt;
 use tokio::signal;
-use tracing::trace;
 use networking::ConnectionMode;
-use crate::logical_server;
 use crate::logical_server::GameServer;
 
 /**
@@ -73,17 +70,8 @@ impl ServerShell {
 
         self.starting()?;
 
-        let network_config = networking::NetworkSettings {
-            compression_threshold: None,
-            callbacks: Default::default(),
-            tokio_handle: None,
-            address:  "0.0.0.0:25565".parse::<SocketAddr>()?,
-            connection_mode: ConnectionMode::Offline,
-            ..Default::default()
-        };
-
-        let new_connections = networking::build_plugin(network_config, &self.tokio)?;
-        let mut logical_server = GameServer::new(new_connections);
+        let new_connections = networking::build_plugin(self.config.network_config.clone(), &self.tokio)?;
+        let logical_server = GameServer::new(new_connections);
 
         let task = async {
 

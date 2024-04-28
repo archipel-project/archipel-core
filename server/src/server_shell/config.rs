@@ -1,6 +1,6 @@
-use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use serde::{Deserialize, Serialize};
+use networking::NetworkConfig;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -18,29 +18,6 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             tokio_threads: NonZeroUsize::new(4),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct NetworkConfig {
-    /// The address to bind the server to.
-    pub bind: SocketAddr,
-    /// Message Of The Day, shown to the client when they ping the server.
-    pub motd: String,
-    /// The maximum number of players that can be connected to the server.
-    pub max_players: NonZeroU32,
-    /// If true, the server will allow only online-mode clients to connect.
-    pub online_mode: bool,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            bind: "127.0.0.1:25565".parse().unwrap(),
-            motd: "Hello, world!".to_string(),
-            max_players: NonZeroU32::new(4).unwrap(),
-            online_mode: false,
         }
     }
 }

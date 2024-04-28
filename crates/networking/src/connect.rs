@@ -2,6 +2,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
@@ -37,7 +38,7 @@ use crate::client::Properties;
 pub(super) async fn do_accept_loop(shared: SharedNetworkState) {
 
     info!("listening for incoming connections in {MINECRAFT_VERSION} mode");
-    let listener = match TcpListener::bind(shared.0.address).await {
+    let listener = match TcpListener::bind(shared.config.address).await {
         Ok(listener) => listener,
         Err(e) => {
             error!("failed to start TCP listener: {e}");
@@ -48,7 +49,7 @@ pub(super) async fn do_accept_loop(shared: SharedNetworkState) {
     let timeout = Duration::from_secs(5);
 
     loop {
-        match shared.0.connection_sema.clone().acquire_owned().await {
+        match shared.connection_sema.clone().acquire_owned().await {
             Ok(permit) => match listener.accept().await {
                 Ok((stream, remote_addr)) => {
                     let shared = shared.clone();
@@ -141,7 +142,7 @@ async fn handle_handshake(
 
     // TODO: this is borked.
     ensure!(
-        shared.0.connection_mode == ConnectionMode::BungeeCord
+        shared.config.connection_mode == ConnectionMode::BungeeCord
             || handshake.server_address.encode_utf16().count() <= 255,
         "handshake server address is too long"
     );
@@ -158,12 +159,12 @@ async fn handle_handshake(
                 Some((info, cleanup)) => {
                     let client = io.into_client_args(
                         info,
-                        shared.0.incoming_byte_limit,
-                        shared.0.outgoing_byte_limit,
+                        shared.config.incoming_byte_limit,
+                        shared.config.outgoing_byte_limit,
                         cleanup,
                     );
 
-                    let _ = shared.0.new_clients_send.send_async(client).await;
+                    let _ = shared.new_clients_send.send_async(client).await;
 
                     Ok(())
                 }
@@ -182,7 +183,6 @@ async fn handle_status(
     io.recv_packet::<QueryRequestC2s>().await?;
 
     match shared
-        .0
         .callbacks
         .inner
         .server_list_ping(&shared, remote_addr, &handshake)
@@ -275,7 +275,7 @@ async fn handle_login(
 
     let username = username.to_owned();
 
-    let info = match shared.connection_mode() {
+    let info = match &shared.config.connection_mode {
         ConnectionMode::Online { .. } => login_online(shared, io, remote_addr, username).await?,
         ConnectionMode::Offline => login_offline(remote_addr, username)?,
         ConnectionMode::BungeeCord => {
@@ -285,17 +285,17 @@ async fn handle_login(
     };
 
 
-    if let Some(threshold) = shared.0.threshold {
+    if let Some(threshold) = shared.config.compression_threshold {
         io.send_packet(&LoginCompressionS2c {
             threshold: (threshold as i32).into(),
         })
         .await?;
 
-        io.set_compression(shared.0.threshold);
+        io.set_compression(shared.config.compression_threshold);
     }
 
 
-    let cleanup = match shared.0.callbacks.inner.login(shared, &info).await {
+    let cleanup = match shared.callbacks.inner.login(shared, &info).await {
         Ok(f) => CleanupOnDrop(Some(f)),
         Err(reason) => {
             info!("disconnect at login: \"{reason}\"");
@@ -330,7 +330,7 @@ async fn login_online(
 
     io.send_packet(&LoginHelloS2c {
         server_id: "".into(), // Always empty
-        public_key: &shared.0.public_key_der,
+        public_key: &shared.public_key_der,
         verify_token: &my_verify_token,
     })
     .await?;
@@ -341,13 +341,11 @@ async fn login_online(
     } = io.recv_packet().await?;
 
     let shared_secret = shared
-        .0
         .rsa_key
         .decrypt(Pkcs1v15Encrypt, shared_secret)
         .context("failed to decrypt shared secret")?;
 
     let verify_token = shared
-        .0
         .rsa_key
         .decrypt(Pkcs1v15Encrypt, encrypted_verify_token)
         .context("failed to decrypt verify token")?;
@@ -366,11 +364,10 @@ async fn login_online(
 
     let hash = Sha1::new()
         .chain(&shared_secret)
-        .chain(&shared.0.public_key_der)
+        .chain(&shared.public_key_der)
         .finalize();
 
     let url = shared
-        .0
         .callbacks
         .inner
         .session_server(
@@ -381,7 +378,7 @@ async fn login_online(
         )
         .await;
 
-    let resp = shared.0.http_client.get(url).send().await?;
+    let resp = shared.http_client.get(url).send().await?;
 
     match resp.status() {
         StatusCode::OK => {}

@@ -2,7 +2,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{io, mem};
-use std::net::IpAddr;
 
 use anyhow::bail;
 use bytes::BytesMut;
@@ -10,9 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
-use tracing::{debug, trace, warn};
-use uuid::Uuid;
-use valence_protocol::{CompressionThreshold, Decode, Encode, Packet, PacketDecoder, PacketEncoder, Property};
+use tracing::{debug, warn};
+use valence_protocol::{CompressionThreshold, Decode, Encode, Packet, PacketDecoder, PacketEncoder};
 use valence_protocol::decode::PacketFrame;
 
 use crate::byte_channel::{byte_channel, ByteSender, TrySendError};

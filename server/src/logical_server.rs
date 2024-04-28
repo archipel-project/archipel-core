@@ -1,5 +1,5 @@
 use flume::Receiver;
-use tracing::{info, trace};
+use tracing::info;
 
 use networking::client::ClientBundleArgs;
 
@@ -22,7 +22,7 @@ impl GameServer {
         }
     }
 
-    pub fn tick(&mut self, tick_date: u64) -> anyhow::Result<()> {
+    pub fn tick(&mut self, _tick_date: u64) -> anyhow::Result<()> {
         for client in self.new_connections.try_iter() {
 
 

@@ -24,13 +24,12 @@ mod packet_io;
 pub mod client;
 
 use std::borrow::Cow;
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 pub use async_trait::async_trait;
 use connect::do_accept_loop;
 pub use connect::HandshakeData;
@@ -51,10 +50,9 @@ use valence_protocol::text::IntoText;
 use valence_text::Text;
 use crate::client::{ClientBundleArgs, Properties};
 
-pub struct NetworkPlugin;
+//this crate obviously come from valence_network, it has been renamed for our needs, but it came form a good old copy-paste
 
-pub fn build_plugin(config: NetworkSettings, runtime: &Runtime) -> anyhow::Result<Receiver<ClientBundleArgs>> {
-    let threshold = config.compression_threshold;
+pub fn build_plugin(config: NetworkConfig, runtime: &Runtime) -> anyhow::Result<Receiver<ClientBundleArgs>> {
 
     let (new_clients_send, new_clients_recv) = flume::bounded(64);
 
@@ -64,24 +62,18 @@ pub fn build_plugin(config: NetworkSettings, runtime: &Runtime) -> anyhow::Resul
         rsa_der::public_key_to_der(&rsa_key.n().to_bytes_be(), &rsa_key.e().to_bytes_be())
             .into_boxed_slice();
 
-    let shared = SharedNetworkState(Arc::new(SharedNetworkStateInner {
-        callbacks: config.callbacks.clone(),
-        address: config.address,
-        incoming_byte_limit: config.incoming_byte_limit,
-        outgoing_byte_limit: config.outgoing_byte_limit,
+    let shared = Arc::new(SharedNetworkStateInner {
+        config: config.clone(),
+        callbacks: ErasedNetworkCallbacks::default(),
         connection_sema: Arc::new(Semaphore::new(
-            config.max_connections.min(Semaphore::MAX_PERMITS),
+            config.max_connections.get().min(Semaphore::MAX_PERMITS),
         )),
         player_count: AtomicUsize::new(0),
-        max_players: config.max_players,
-        connection_mode: config.connection_mode.clone(),
-        threshold,
-        tokio_handle: runtime.handle().clone(),
         new_clients_send,
         rsa_key,
         public_key_der,
         http_client: reqwest::Client::new(),
-    }));
+    });
 
     // System for starting the accept loop.
     runtime.spawn(async move {
@@ -91,94 +83,24 @@ pub fn build_plugin(config: NetworkSettings, runtime: &Runtime) -> anyhow::Resul
     Ok(new_clients_recv)
 }
 
-
-
-#[derive(Clone)]
-pub struct SharedNetworkState(Arc<SharedNetworkStateInner>);
-
-impl SharedNetworkState {
-    pub fn connection_mode(&self) -> &ConnectionMode {
-        &self.0.connection_mode
-    }
-
-    pub fn player_count(&self) -> &AtomicUsize {
-        &self.0.player_count
-    }
-
-    pub fn max_players(&self) -> usize {
-        self.0.max_players
-    }
-}
-struct SharedNetworkStateInner {
-    callbacks: ErasedNetworkCallbacks,
-    address: SocketAddr,
-    incoming_byte_limit: usize,
-    outgoing_byte_limit: usize,
-    /// Limits the number of simultaneous connections to the server before the
-    /// play state.
-    connection_sema: Arc<Semaphore>,
-    /// The number of clients in the play state, past the login state.
-    player_count: AtomicUsize,
-    max_players: usize,
-    connection_mode: ConnectionMode,
-    threshold: CompressionThreshold,
-    tokio_handle: Handle,
-    // Holding a runtime handle is not enough to keep tokio working. We need
-    // to store the runtime here so we don't drop it.
-    //_tokio_runtime: Option<Runtime>,
-    /// Sender for new clients past the login stage.
-    new_clients_send: Sender<ClientBundleArgs>,
-    /// The RSA keypair used for encryption with clients.
-    rsa_key: RsaPrivateKey,
-    /// The public part of `rsa_key` encoded in DER, which is an ASN.1 format.
-    /// This is sent to clients during the authentication process.
-    public_key_der: Box<[u8]>,
-    /// For session server requests.
-    http_client: reqwest::Client,
-}
-
-/// Contains information about a new client joining the server.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct NewClientInfo {
-    /// The username of the new client.
-    pub username: String,
-    /// The UUID of the new client.
-    pub uuid: Uuid,
-    /// The remote address of the new client.
-    pub ip: IpAddr,
-    /// The client's properties from the game profile. Typically, contains a
-    /// `textures` property with the skin and cape of the player.
-    pub properties: Properties,
-}
-
-/// Settings for [`NetworkPlugin`]. Note that mutations to these fields have no
+/// Settings for [`crate::NetworkPlugin`]. Note that mutations to these fields have no
 /// effect after the plugin is built.
-#[derive(Clone)]
-pub struct NetworkSettings {
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub struct NetworkConfig {
     pub compression_threshold: CompressionThreshold,
-
-    pub callbacks: ErasedNetworkCallbacks,
-    /// The [`Handle`] to the tokio runtime the server will use. If `None` is
-    /// provided, the server will create its own tokio runtime at startup.
-    ///
-    /// # Default Value
-    ///
-    /// `None`
-    pub tokio_handle: Option<Handle>,
     /// The maximum number of simultaneous initial connections to the server.
     ///
     /// This only considers the connections _before_ the play state where the
-    /// client is spawned into the world..
+    /// client is spawned into the world.
     ///
     /// # Default Value
     ///
     /// The default value is left unspecified and may change in future versions.
-    pub max_connections: usize,
+    pub max_connections: NonZeroUsize,
     /// # Default Value
     ///
     /// `20`
-    pub max_players: usize,
+    pub max_players: NonZeroUsize,
     /// The socket address the server will be bound to.
     ///
     /// # Default Value
@@ -219,14 +141,12 @@ pub struct NetworkSettings {
     pub outgoing_byte_limit: usize,
 }
 
-impl Default for NetworkSettings {
+impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             compression_threshold: Some(256),
-            callbacks: ErasedNetworkCallbacks::default(),
-            tokio_handle: None,
-            max_connections: 1024,
-            max_players: 20,
+            max_connections: NonZeroUsize::new(512).unwrap(),
+            max_players: NonZeroUsize::new(20).unwrap(),
             address: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 25565).into(),
             connection_mode: ConnectionMode::Online {
                 prevent_proxy_connections: false,
@@ -235,6 +155,44 @@ impl Default for NetworkSettings {
             outgoing_byte_limit: 8388608, // 8 MiB
         }
     }
+}
+
+type SharedNetworkState = Arc<SharedNetworkStateInner>;
+
+struct SharedNetworkStateInner {
+    config: NetworkConfig,
+    callbacks: ErasedNetworkCallbacks,
+    /// Limits the number of simultaneous connections to the server before the
+    /// play state.
+    connection_sema: Arc<Semaphore>,
+    /// The number of clients in the play state, past the login state.
+    player_count: AtomicUsize,
+    // Holding a runtime handle is not enough to keep tokio working. We need
+    // to store the runtime here so we don't drop it.
+    /// Sender for new clients past the login stage.
+    new_clients_send: Sender<ClientBundleArgs>,
+    /// The RSA keypair used for encryption with clients.
+    rsa_key: RsaPrivateKey,
+    /// The public part of `rsa_key` encoded in DER, which is an ASN.1 format.
+    /// This is sent to clients during the authentication process.
+    public_key_der: Box<[u8]>,
+    /// For session server requests.
+    http_client: reqwest::Client,
+}
+
+/// Contains information about a new client joining the server.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct NewClientInfo {
+    /// The username of the new client.
+    pub username: String,
+    /// The UUID of the new client.
+    pub uuid: Uuid,
+    /// The remote address of the new client.
+    pub ip: IpAddr,
+    /// The client's properties from the game profile. Typically, contains a
+    /// `textures` property with the skin and cape of the player.
+    pub properties: Properties,
 }
 
 /// A type-erased wrapper around an [`NetworkCallbacks`] object.
@@ -286,8 +244,8 @@ pub trait NetworkCallbacks: Send + Sync + 'static {
         #![allow(unused_variables)]
 
         ServerListPing::Respond {
-            online_players: shared.player_count().load(Ordering::Relaxed) as i32,
-            max_players: shared.max_players() as i32,
+            online_players: shared.player_count.load(Ordering::Relaxed) as i32,
+            max_players: shared.config.max_players.get() as i32,
             player_sample: vec![],
             description: "Archipel Server".into_text(),
             favicon_png: &[],
@@ -389,10 +347,10 @@ pub trait NetworkCallbacks: Send + Sync + 'static {
     ) -> Result<CleanupFn, Text> {
         let _ = info;
 
-        let max_players = shared.max_players();
+        let max_players = shared.config.max_players.get();
 
         let success = shared
-            .player_count()
+            .player_count
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 if n < max_players {
                     Some(n + 1)
@@ -406,7 +364,7 @@ pub trait NetworkCallbacks: Send + Sync + 'static {
             let shared = shared.clone();
 
             Ok(Box::new(move || {
-                let prev = shared.player_count().fetch_sub(1, Ordering::SeqCst);
+                let prev = shared.player_count.fetch_sub(1, Ordering::SeqCst);
                 debug_assert_ne!(prev, 0, "player count underflowed");
             }))
         } else {
@@ -439,8 +397,8 @@ pub trait NetworkCallbacks: Send + Sync + 'static {
         auth_digest: &str,
         player_ip: &IpAddr,
     ) -> String {
-        if shared.connection_mode()
-            == (&ConnectionMode::Online {
+        if shared.config.connection_mode
+            == (ConnectionMode::Online {
                 prevent_proxy_connections: true,
             })
         {
@@ -468,7 +426,7 @@ impl Drop for CleanupOnDrop {
 impl NetworkCallbacks for () {}
 
 /// Describes how new connections to the server are handled.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[non_exhaustive]
 pub enum ConnectionMode {
     /// The "online mode" fetches all player data (username, UUID, and
@@ -531,7 +489,7 @@ pub enum ConnectionMode {
     Velocity {
         /// The secret key used to prevent connections from outside Velocity.
         /// The proxy and Valence must be configured to use the same secret key.
-        secret: Arc<str>,
+        secret: String,
     },
 }
 
@@ -609,7 +567,7 @@ pub struct PlayerSampleEntry {
 }
 
 async fn do_broadcast_to_lan_loop(shared: SharedNetworkState) {
-    let port = shared.0.address.port();
+    let port = shared.config.address.port();
 
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
         error!("Failed to bind to UDP socket for broadcast to LAN");
@@ -617,7 +575,7 @@ async fn do_broadcast_to_lan_loop(shared: SharedNetworkState) {
     };
 
     loop {
-        let motd = match shared.0.callbacks.inner.broadcast_to_lan(&shared).await {
+        let motd = match shared.callbacks.inner.broadcast_to_lan(&shared).await {
             BroadcastToLan::Disabled => {
                 time::sleep(Duration::from_millis(1500)).await;
                 continue;
