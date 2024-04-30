@@ -18,6 +18,7 @@ serde_json = "1.0.109"
 sha1 = "0.11.0-pre.3"
 num-bigint = "0.4.4"
 sha2 = "0.11.0-pre.3"
+image = "0.25.1"
 
 flume.workspace = true
 anyhow.workspace = true

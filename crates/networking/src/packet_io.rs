@@ -2,7 +2,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{io, mem};
-
 use anyhow::bail;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,8 +13,8 @@ use valence_protocol::{CompressionThreshold, Decode, Encode, Packet, PacketDecod
 use valence_protocol::decode::PacketFrame;
 
 use crate::byte_channel::{byte_channel, ByteSender, TrySendError};
-use crate::{CleanupOnDrop, NewClientInfo};
-use crate::client::{ClientBundleArgs, ClientConnection, ReceivedPacket};
+use crate::{NewClientInfo, PlayerCountToken, SharedNetworkStateInner};
+use crate::client::{PrimitiveClientComponents, ClientConnection, ReceivedPacket};
 
 pub(crate) struct PacketIo {
     stream: TcpStream,
@@ -84,23 +83,23 @@ impl PacketIo {
         self.dec.enable_encryption(key);
     }
 
-    pub(crate) fn into_client_args(
+    pub(crate) fn build(
         mut self,
         info: NewClientInfo,
-        incoming_byte_limit: usize,
-        outgoing_byte_limit: usize,
-        cleanup: CleanupOnDrop,
-    ) -> ClientBundleArgs {
+        player_count_token: PlayerCountToken,
+        shared: &SharedNetworkStateInner,
+
+    ) -> PrimitiveClientComponents {
         let (incoming_sender, incoming_receiver) = flume::unbounded();
 
-        let incoming_byte_limit = incoming_byte_limit.min(Semaphore::MAX_PERMITS);
+        let incoming_byte_limit = shared.config.incoming_byte_limit.min(Semaphore::MAX_PERMITS);
 
         let recv_sem = Arc::new(Semaphore::new(incoming_byte_limit));
         let recv_sem_clone = recv_sem.clone();
 
         let (mut reader, mut writer) = self.stream.into_split();
 
-        let reader_task = tokio::spawn(async move {
+        let reader_task = shared.runtime.spawn(async move {
             let mut buf = BytesMut::new();
 
             loop {
@@ -167,7 +166,7 @@ impl PacketIo {
             }
         });
 
-        let (outgoing_sender, mut outgoing_receiver) = byte_channel(outgoing_byte_limit);
+        let (outgoing_sender, mut outgoing_receiver) = byte_channel(shared.config.outgoing_byte_limit);
 
         let writer_task = tokio::spawn(async move {
             loop {
@@ -185,7 +184,7 @@ impl PacketIo {
             }
         });
 
-        ClientBundleArgs {
+        PrimitiveClientComponents {
             username: info.username,
             uuid: info.uuid,
             ip: info.ip,
@@ -193,10 +192,10 @@ impl PacketIo {
             conn: Box::new(RealClientConnection {
                 send: outgoing_sender,
                 recv: incoming_receiver,
+                _player_count_token: player_count_token,
                 recv_sem: recv_sem_clone,
                 reader_task,
                 writer_task,
-                _cleanup: cleanup,
             }),
             enc: self.enc,
         }
@@ -206,10 +205,11 @@ impl PacketIo {
 struct RealClientConnection {
     send: ByteSender,
     recv: flume::Receiver<ReceivedPacket>,
+    /// never accessed, but required to keep alive to count received packets
+    _player_count_token: PlayerCountToken,
     /// Limits the amount of data queued in the `recv` channel. Each permit
     /// represents one byte.
     recv_sem: Arc<Semaphore>,
-    _cleanup: CleanupOnDrop,
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
 }

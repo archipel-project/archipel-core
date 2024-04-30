@@ -4,8 +4,8 @@ use bytes::{Bytes, BytesMut};
 use uuid::Uuid;
 use valence_protocol::{PacketEncoder, Property};
 
-/// Arguments for [`ClientBundle::new`].
-pub struct ClientBundleArgs {
+//todo change that to be components in the ECS
+pub struct PrimitiveClientComponents {
     /// The username for the client.
     pub username: String,
     /// UUID of the client.

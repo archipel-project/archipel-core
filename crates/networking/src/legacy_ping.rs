@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
-use crate::{ServerListLegacyPing, SharedNetworkState};
+use crate::{server_list_legacy_ping, ServerListLegacyPing, SharedNetworkState};
 
 /// The payload of the legacy server list ping.
 #[derive(PartialEq, Debug, Clone)]
@@ -114,11 +114,8 @@ pub(crate) async fn try_handle_legacy_ping(
         PingFormat::Pre1_4 => ServerListLegacyPingPayload::Pre1_4,
     };
 
-    if let ServerListLegacyPing::Respond(mut response) = shared
-        .callbacks
-        .inner
-        .server_list_legacy_ping(shared, remote_addr, payload)
-        .await
+    if let ServerListLegacyPing::Respond(mut response) =
+        server_list_legacy_ping(shared, remote_addr, payload)
     {
         if format == PingFormat::Pre1_4 {
             // remove formatting for pre-1.4 legacy pings

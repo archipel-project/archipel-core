@@ -23,7 +23,6 @@ mod legacy_ping;
 mod packet_io;
 pub mod client;
 
-use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,19 +39,18 @@ use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
-use tokio::time;
 use tracing::error;
 use uuid::Uuid;
 use valence_protocol::{CompressionThreshold, MINECRAFT_VERSION, PROTOCOL_VERSION};
 use valence_protocol::text::IntoText;
 use valence_text::Text;
-use crate::client::{ClientBundleArgs, Properties};
+use crate::client::{PrimitiveClientComponents, Properties};
 
 //this crate obviously come from valence_network, it has been renamed for our needs, but it came form a good old copy-paste
 
-pub fn build_plugin(config: NetworkConfig, runtime: &Runtime) -> anyhow::Result<Receiver<ClientBundleArgs>> {
+pub fn build_plugin(config: NetworkConfig, runtime: Arc<Runtime>) -> anyhow::Result<Receiver<PrimitiveClientComponents>> {
 
     let (new_clients_send, new_clients_recv) = flume::bounded(64);
 
@@ -64,7 +62,7 @@ pub fn build_plugin(config: NetworkConfig, runtime: &Runtime) -> anyhow::Result<
 
     let shared = Arc::new(SharedNetworkStateInner {
         config: config.clone(),
-        callbacks: ErasedNetworkCallbacks::default(),
+        runtime: runtime.clone(),
         connection_sema: Arc::new(Semaphore::new(
             config.max_connections.get().min(Semaphore::MAX_PERMITS),
         )),
@@ -75,9 +73,14 @@ pub fn build_plugin(config: NetworkConfig, runtime: &Runtime) -> anyhow::Result<
         http_client: reqwest::Client::new(),
     });
 
+    // System for starting the broadcast to LAN loop.
+    runtime.spawn(async move {
+        do_broadcast_to_lan_loop(config).await;
+    });
+
     // System for starting the accept loop.
     runtime.spawn(async move {
-        do_accept_loop(shared.clone()).await;
+        do_accept_loop(shared).await;
     });
 
     Ok(new_clients_recv)
@@ -117,6 +120,9 @@ pub struct NetworkConfig {
     ///
     /// [`ConnectionMode::Online`]
     pub connection_mode: ConnectionMode,
+
+
+    pub broadcast_to_lan: BroadcastToLan,
     /// The maximum capacity (in bytes) of the buffer used to hold incoming
     /// packet data.
     ///
@@ -151,17 +157,19 @@ impl Default for NetworkConfig {
             connection_mode: ConnectionMode::Online {
                 prevent_proxy_connections: false,
             },
+            broadcast_to_lan: BroadcastToLan::Enabled("Archipel server".to_owned()),
             incoming_byte_limit: 2097152, // 2 MiB
             outgoing_byte_limit: 8388608, // 8 MiB
         }
     }
 }
-
 type SharedNetworkState = Arc<SharedNetworkStateInner>;
 
 struct SharedNetworkStateInner {
+    /// Global network configuration.
     config: NetworkConfig,
-    callbacks: ErasedNetworkCallbacks,
+    /// The tokio runtime used for the server.
+    runtime: Arc<Runtime>,
     /// Limits the number of simultaneous connections to the server before the
     /// play state.
     connection_sema: Arc<Semaphore>,
@@ -170,7 +178,7 @@ struct SharedNetworkStateInner {
     // Holding a runtime handle is not enough to keep tokio working. We need
     // to store the runtime here so we don't drop it.
     /// Sender for new clients past the login stage.
-    new_clients_send: Sender<ClientBundleArgs>,
+    new_clients_send: Sender<PrimitiveClientComponents>,
     /// The RSA keypair used for encryption with clients.
     rsa_key: RsaPrivateKey,
     /// The public part of `rsa_key` encoded in DER, which is an ASN.1 format.
@@ -195,238 +203,167 @@ pub struct NewClientInfo {
     pub properties: Properties,
 }
 
-/// A type-erased wrapper around an [`NetworkCallbacks`] object.
-#[derive(Clone)]
-pub struct ErasedNetworkCallbacks {
-    // TODO: do some shenanigans when async-in-trait is stabilized.
-    inner: Arc<dyn NetworkCallbacks>,
-}
+/// Called when the server receives a Server List Ping query.
+/// Data for the response can be provided or the query can be ignored.
+///
+/// This function is called from within a tokio runtime.
+///
+/// # Default Implementation
+///
+/// A default placeholder response is returned.
+fn server_list_ping(
+    shared: &SharedNetworkState,
+    remote_addr: SocketAddr,
+    handshake_data: &HandshakeData,
+) -> ServerListPing<'static> {
+    #![allow(unused_variables)]
 
-impl ErasedNetworkCallbacks {
-    pub fn new(callbacks: impl NetworkCallbacks) -> Self {
-        Self {
-            inner: Arc::new(callbacks),
-        }
+
+    ServerListPing::Respond {
+        online_players: shared.player_count.load(Ordering::Relaxed) as i32,
+        max_players: shared.config.max_players.get() as i32,
+        player_sample: vec![],
+        description: "Archipel Server".into_text(),
+        favicon_png: include_bytes!("archipel.png"),
+        version_name: MINECRAFT_VERSION.to_owned(),
+        protocol: PROTOCOL_VERSION,
     }
 }
 
-impl Default for ErasedNetworkCallbacks {
-    fn default() -> Self {
-        Self {
-            inner: Arc::new(()),
-        }
-    }
-}
+/// Called when the server receives a Server List Legacy Ping query.
+/// Data for the response can be provided or the query can be ignored.
+///
+/// This function is called from within a tokio runtime.
+///
+/// # Default Implementation
+///
+/// [`server_list_ping`][Self::server_list_ping] re-used.
+fn server_list_legacy_ping(
+    shared: &SharedNetworkState,
+    remote_addr: SocketAddr,
+    payload: ServerListLegacyPingPayload,
+) -> ServerListLegacyPing {
+    #![allow(unused_variables)]
 
-impl<T: NetworkCallbacks> From<T> for ErasedNetworkCallbacks {
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
+    let handshake_data = match payload {
+        ServerListLegacyPingPayload::Pre1_7 {
+            protocol,
+            hostname,
+            port,
+        } => HandshakeData {
+            protocol_version: protocol,
+            server_address: hostname,
+            server_port: port,
+        },
+        _ => HandshakeData::default(),
+    };
 
-/// This trait uses [`mod@async_trait`].
-#[async_trait]
-pub trait NetworkCallbacks: Send + Sync + 'static {
-    /// Called when the server receives a Server List Ping query.
-    /// Data for the response can be provided or the query can be ignored.
-    ///
-    /// This function is called from within a tokio runtime.
-    ///
-    /// # Default Implementation
-    ///
-    /// A default placeholder response is returned.
-    async fn server_list_ping(
-        &self,
-        shared: &SharedNetworkState,
-        remote_addr: SocketAddr,
-        handshake_data: &HandshakeData,
-    ) -> ServerListPing {
-        #![allow(unused_variables)]
-
+    match server_list_ping(shared, remote_addr, &handshake_data)
+    {
         ServerListPing::Respond {
-            online_players: shared.player_count.load(Ordering::Relaxed) as i32,
-            max_players: shared.config.max_players.get() as i32,
-            player_sample: vec![],
-            description: "Archipel Server".into_text(),
-            favicon_png: &[],
-            version_name: MINECRAFT_VERSION.to_owned(),
-            protocol: PROTOCOL_VERSION,
-        }
+            online_players,
+            max_players,
+            player_sample,
+            description,
+            favicon_png,
+            version_name,
+            protocol,
+        } => ServerListLegacyPing::Respond(
+            ServerListLegacyPingResponse::new(protocol, online_players, max_players)
+                .version(version_name)
+                .description(description.to_legacy_lossy()),
+        ),
+        ServerListPing::Ignore => ServerListLegacyPing::Ignore,
     }
+}
 
-    /// Called when the server receives a Server List Legacy Ping query.
-    /// Data for the response can be provided or the query can be ignored.
-    ///
-    /// This function is called from within a tokio runtime.
-    ///
-    /// # Default Implementation
-    ///
-    /// [`server_list_ping`][Self::server_list_ping] re-used.
-    async fn server_list_legacy_ping(
-        &self,
-        shared: &SharedNetworkState,
-        remote_addr: SocketAddr,
-        payload: ServerListLegacyPingPayload,
-    ) -> ServerListLegacyPing {
-        #![allow(unused_variables)]
 
-        let handshake_data = match payload {
-            ServerListLegacyPingPayload::Pre1_7 {
-                protocol,
-                hostname,
-                port,
-            } => HandshakeData {
-                protocol_version: protocol,
-                server_address: hostname,
-                server_port: port,
-            },
-            _ => HandshakeData::default(),
-        };
+///this token is used to count the number of players on the server, creating a new token increases the player count, and dropping it decreases the player count
+struct PlayerCountToken{
+    shared: SharedNetworkState,
+}
 
-        match self
-            .server_list_ping(shared, remote_addr, &handshake_data)
-            .await
-        {
-            ServerListPing::Respond {
-                online_players,
-                max_players,
-                player_sample,
-                description,
-                favicon_png,
-                version_name,
-                protocol,
-            } => ServerListLegacyPing::Respond(
-                ServerListLegacyPingResponse::new(protocol, online_players, max_players)
-                    .version(version_name)
-                    .description(description.to_legacy_lossy()),
-            ),
-            ServerListPing::Ignore => ServerListLegacyPing::Ignore,
-        }
-    }
-
-    /// This function is called every 1.5 seconds to broadcast a packet over the
-    /// local network in order to advertise the server to the multiplayer
-    /// screen with a configurable MOTD.
-    ///
-    /// # Default Implementation
-    ///
-    /// The default implementation returns [`BroadcastToLan::Disabled`],
-    /// disabling LAN discovery.
-    async fn broadcast_to_lan(&self, shared: &SharedNetworkState) -> BroadcastToLan {
-        #![allow(unused_variables)]
-
-        BroadcastToLan::Disabled
-    }
-
-    /// Called for each client (after successful authentication if online mode
-    /// is enabled) to determine if they can join the server.
-    /// - If `Err(reason)` is returned, then the client is immediately
-    ///   disconnected with `reason` as the displayed message.
-    /// - Otherwise, `Ok(f)` is returned and the client will continue the login
-    ///   process. This _may_ result in a new client being spawned with the
-    ///   [`ClientBundle`] components. `f` is stored along with the client and
-    ///   is called when the client is disconnected.
-    ///
-    ///   `f` is a callback function used for handling resource cleanup when the
-    /// client is dropped. This is useful because a new client entity is not
-    /// necessarily spawned into the world after a successful login.
-    ///
-    /// This method is called from within a tokio runtime, and is the
-    /// appropriate place to perform asynchronous operations such as
-    /// database queries which may take some time to complete.
-    ///
-    /// # Default Implementation
-    ///
-    /// TODO
-    ///
-    /// [`Client`]: valence::client::Client
-    async fn login(
-        &self,
-        shared: &SharedNetworkState,
-        info: &NewClientInfo,
-    ) -> Result<CleanupFn, Text> {
-        let _ = info;
-
+impl PlayerCountToken {
+    fn new(shared: SharedNetworkState) -> Option<Self> {
         let max_players = shared.config.max_players.get();
 
-        let success = shared
-            .player_count
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n < max_players {
-                    Some(n + 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok();
-
-        if success {
-            let shared = shared.clone();
-
-            Ok(Box::new(move || {
-                let prev = shared.player_count.fetch_sub(1, Ordering::SeqCst);
-                debug_assert_ne!(prev, 0, "player count underflowed");
-            }))
-        } else {
-            // TODO: use correct translation key.
-            Err("Server Full".into_text())
-        }
-    }
-
-    /// Called upon every client login to obtain the full URL to use for session
-    /// server requests. This is done to authenticate player accounts. This
-    /// method is not called unless [online mode] is enabled.
-    ///
-    /// It is assumed that upon successful request, a structure matching the
-    /// description in the [wiki](https://wiki.vg/Protocol_Encryption#Server) was obtained.
-    /// Providing a URL that does not return such a structure will result in a
-    /// disconnect for every client that connects.
-    ///
-    /// The arguments are described in the linked wiki article.
-    ///
-    /// # Default Implementation
-    ///
-    /// Uses the official Minecraft session server. This is formatted as
-    /// `https://sessionserver.mojang.com/session/minecraft/hasJoined?username=<username>&serverId=<auth-digest>&ip=<player-ip>`.
-    ///
-    /// [online mode]: ConnectionMode::Online
-    async fn session_server(
-        &self,
-        shared: &SharedNetworkState,
-        username: &str,
-        auth_digest: &str,
-        player_ip: &IpAddr,
-    ) -> String {
-        if shared.config.connection_mode
-            == (ConnectionMode::Online {
-                prevent_proxy_connections: true,
-            })
-        {
-            format!("https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={auth_digest}&ip={player_ip}")
-        } else {
-            format!("https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={auth_digest}")
-        }
+        shared.player_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            if count < max_players {
+                Some(count + 1)
+            } else {
+                None
+            }
+        }).ok().map(|_| Self { shared })
     }
 }
 
-/// A callback function called when the associated client is dropped. See
-/// [`NetworkCallbacks::login`] for more information.
-pub type CleanupFn = Box<dyn FnOnce() + Send + Sync + 'static>;
-struct CleanupOnDrop(Option<CleanupFn>);
-
-impl Drop for CleanupOnDrop {
+impl Drop for PlayerCountToken {
     fn drop(&mut self) {
-        if let Some(f) = self.0.take() {
-            f();
-        }
+        self.shared.player_count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-/// The default network callbacks. Useful as a placeholder.
-impl NetworkCallbacks for () {}
+/// Called for each client (after successful authentication if online mode
+/// is enabled) to determine if they can join the server.
+/// - If `Err(reason)` is returned, then the client is immediately
+///   disconnected with `reason` as the displayed message.
+/// - Otherwise, `Ok(f)` is returned and the client will continue the login
+///   process. This _may_ result in a new client being spawned with the
+///   [`ClientBundle`] components. `f` is stored along with the client and
+///   is called when the client is disconnected.
+///
+///   `f` is a callback function used for handling resource cleanup when the
+/// client is dropped. This is useful because a new client entity is not
+/// necessarily spawned into the world after a successful login.
+///
+/// # Default Implementation
+fn login(
+    shared: SharedNetworkState,
+    info: &NewClientInfo,
+) -> Result<PlayerCountToken, Text> {
+    let _ = info; //could be used later
+
+    // TODO: use correct translation key.
+    PlayerCountToken::new(shared).ok_or_else(|| "Server Full".into_text())
+}
+
+/// Called upon every client login to obtain the full URL to use for session
+/// server requests. This is done to authenticate player accounts. This
+/// method is not called unless [online mode] is enabled.
+///
+/// It is assumed that upon successful request, a structure matching the
+/// description in the [wiki](https://wiki.vg/Protocol_Encryption#Server) was obtained.
+/// Providing a URL that does not return such a structure will result in a
+/// disconnect for every client that connects.
+///
+/// The arguments are described in the linked wiki article.
+///
+/// # Default Implementation
+///
+/// Uses the official Minecraft session server. This is formatted as
+/// `https://sessionserver.mojang.com/session/minecraft/hasJoined?username=<username>&serverId=<auth-digest>&ip=<player-ip>`.
+///
+/// [online mode]: ConnectionMode::Online
+fn session_server(
+    shared: &SharedNetworkState,
+    username: &str,
+    auth_digest: &str,
+    player_ip: &IpAddr,
+) -> String {
+    if shared.config.connection_mode
+        == (ConnectionMode::Online {
+        prevent_proxy_connections: true,
+    })
+    {
+        format!("https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={auth_digest}&ip={player_ip}")
+    } else {
+        format!("https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={auth_digest}")
+    }
+}
 
 /// Describes how new connections to the server are handled.
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ConnectionMode {
     /// The "online mode" fetches all player data (username, UUID, and
@@ -488,15 +425,13 @@ pub enum ConnectionMode {
     /// [Velocity]: https://velocitypowered.com/
     Velocity {
         /// The secret key used to prevent connections from outside Velocity.
-        /// The proxy and Valence must be configured to use the same secret key.
+        /// The proxy and this server must be configured to use the same secret key.
         secret: String,
     },
 }
 
-/// The result of the Server List Ping [callback].
-///
-/// [callback]: NetworkCallbacks::server_list_ping
-#[derive(Clone, Default, Debug)]
+/// The result of the Server List Ping.
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub enum ServerListPing<'a> {
     /// Responds to the server list ping with the given information.
     Respond {
@@ -513,14 +448,13 @@ pub enum ServerListPing<'a> {
         description: Text,
         /// The server's icon as the bytes of a PNG image.
         /// The image must be 64x64 pixels.
-        ///
         /// No icon is used if the slice is empty.
         favicon_png: &'a [u8],
         /// The version name of the server. Displayed when client is using a
         /// different protocol.
         ///
         /// Can be formatted using `§` and format codes. Or use
-        /// [`valence_protocol::text::Text::to_legacy_lossy`].
+        /// [`Text::to_legacy_lossy`].
         version_name: String,
         /// The protocol version of the server.
         protocol: i32,
@@ -530,9 +464,7 @@ pub enum ServerListPing<'a> {
     Ignore,
 }
 
-/// The result of the Server List Legacy Ping [callback].
-///
-/// [callback]: NetworkCallbacks::server_list_legacy_ping
+/// The result of the Server List Legacy Ping.
 #[derive(Clone, Default, Debug)]
 pub enum ServerListLegacyPing {
     /// Responds to the server list legacy ping with the given information.
@@ -542,20 +474,18 @@ pub enum ServerListLegacyPing {
     Ignore,
 }
 
-/// The result of the Broadcast To Lan [callback].
-///
-/// [callback]: NetworkCallbacks::broadcast_to_lan
-#[derive(Clone, Default, Debug)]
-pub enum BroadcastToLan<'a> {
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastToLan {
     /// Disabled Broadcast To Lan.
     #[default]
     Disabled,
     /// Send packet to broadcast to LAN every 1.5 seconds with specified MOTD.
-    Enabled(Cow<'a, str>),
+    Enabled(String),
 }
 
 /// Represents an individual entry in the player sample.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerSampleEntry {
     /// The name of the player.
     ///
@@ -566,30 +496,27 @@ pub struct PlayerSampleEntry {
     pub id: Uuid,
 }
 
-async fn do_broadcast_to_lan_loop(shared: SharedNetworkState) {
-    let port = shared.config.address.port();
 
-    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
-        error!("Failed to bind to UDP socket for broadcast to LAN");
-        return;
-    };
+/// This function is broadcast every 1.5 seconds a packet over the
+/// local network in order to advertise the server to the multiplayer
+/// screen with a configurable MOTD.
+async fn do_broadcast_to_lan_loop(config: NetworkConfig) {
+    if let BroadcastToLan::Enabled(motd) = config.broadcast_to_lan {
+        loop {
+            let port = config.address.port();
 
-    loop {
-        let motd = match shared.callbacks.inner.broadcast_to_lan(&shared).await {
-            BroadcastToLan::Disabled => {
-                time::sleep(Duration::from_millis(1500)).await;
-                continue;
+            let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
+                error!("Failed to bind to UDP socket for broadcast to LAN");
+                return;
+            };
+
+            let message = format!("[MOTD]{motd}[/MOTD][AD]{port}[/AD]");
+
+            if let Err(e) = socket.send_to(message.as_bytes(), "224.0.2.60:4445").await {
+                tracing::warn!("Failed to send broadcast to LAN packet: {}", e);
             }
-            BroadcastToLan::Enabled(motd) => motd,
-        };
 
-        let message = format!("[MOTD]{motd}[/MOTD][AD]{port}[/AD]");
-
-        if let Err(e) = socket.send_to(message.as_bytes(), "224.0.2.60:4445").await {
-            tracing::warn!("Failed to send broadcast to LAN packet: {}", e);
+            tokio::time::sleep(Duration::from_millis(1500)).await;
         }
-
-        // wait 1.5 seconds
-        tokio::time::sleep(Duration::from_millis(1500)).await;
     }
 }

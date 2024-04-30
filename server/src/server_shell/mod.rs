@@ -1,8 +1,7 @@
 mod config;
 
-use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::signal;
-use networking::ConnectionMode;
 use crate::logical_server::GameServer;
 
 /**
@@ -12,7 +11,7 @@ use crate::logical_server::GameServer;
  */
 pub struct ServerShell {
     config: config::Config,
-    tokio: tokio::runtime::Runtime,
+    tokio: Arc<tokio::runtime::Runtime>,
 }
 
 impl ServerShell {
@@ -29,7 +28,7 @@ impl ServerShell {
             tokio_builder.worker_threads(threads.get());
         }
 
-        let tokio = tokio_builder.build()?;
+        let tokio = Arc::new(tokio_builder.build()?);
 
         // tracing
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -47,18 +46,20 @@ impl ServerShell {
     }
 
     fn load_config() -> anyhow::Result<config::Config> {
-        let config_file = std::fs::read_to_string("config.toml");
+        const CONFIG_FILE: &str = "config.json";
+
+        let config_file = std::fs::read_to_string(CONFIG_FILE);
         return match config_file {
             Ok(file) => {
-                let config: config::Config = toml::from_str(&file)?;
+                let config: config::Config = serde_json::from_str(&file)?;
                 Ok(config)
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     tracing::warn!("Config file not found, writing default config");
                     let config = config::Config::default();
-                    let toml = toml::to_string(&config)?;
-                    std::fs::write("config.toml",String::from( "# go see: [insert doc link]\n\n") + &toml)?;
+                    let json = serde_json::to_string_pretty(&config)?;
+                    std::fs::write(CONFIG_FILE, json)?;
                     return Ok(config);
                 }
                 Err(anyhow::anyhow!("Error reading config file: {:?}", e))
@@ -70,7 +71,7 @@ impl ServerShell {
 
         self.starting()?;
 
-        let new_connections = networking::build_plugin(self.config.network_config.clone(), &self.tokio)?;
+        let new_connections = networking::build_plugin(self.config.network_config.clone(), self.tokio.clone())?;
         let logical_server = GameServer::new(new_connections);
 
         let task = async {

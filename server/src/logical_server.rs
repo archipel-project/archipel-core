@@ -1,7 +1,7 @@
 use flume::Receiver;
 use tracing::info;
 
-use networking::client::ClientBundleArgs;
+use networking::client::PrimitiveClientComponents;
 
 /**
  * This module contains the logical server implementation.
@@ -11,12 +11,12 @@ use networking::client::ClientBundleArgs;
 
 
 pub(crate) struct GameServer {
-    new_connections: Receiver<ClientBundleArgs>,
+    new_connections: Receiver<PrimitiveClientComponents>,
 
 }
 
 impl GameServer {
-    pub fn new(new_connections: Receiver<ClientBundleArgs>) -> Self {
+    pub fn new(new_connections: Receiver<PrimitiveClientComponents>) -> Self {
         Self {
             new_connections
         }

@@ -17,7 +17,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            tokio_threads: NonZeroUsize::new(4),
+            tokio_threads: None,
         }
     }
 }

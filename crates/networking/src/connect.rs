@@ -2,7 +2,6 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
@@ -31,7 +30,7 @@ use valence_protocol::MINECRAFT_VERSION;
 
 use crate::legacy_ping::try_handle_legacy_ping;
 use crate::packet_io::PacketIo;
-use crate::{CleanupOnDrop, ConnectionMode, NewClientInfo, ServerListPing, SharedNetworkState};
+use crate::{ConnectionMode, login, NewClientInfo, PlayerCountToken, server_list_ping, ServerListPing, session_server, SharedNetworkState};
 use crate::client::Properties;
 
 /// Accepts new connections to the server as they occur.
@@ -54,7 +53,7 @@ pub(super) async fn do_accept_loop(shared: SharedNetworkState) {
                 Ok((stream, remote_addr)) => {
                     let shared = shared.clone();
 
-                    tokio::spawn(async move {
+                    shared.runtime.clone().spawn(async move {
                         if let Err(e) = tokio::time::timeout(
                             timeout,
                             handle_connection(shared, stream, remote_addr),
@@ -156,13 +155,8 @@ async fn handle_handshake(
                 .await
                 .context("handling login")?
             {
-                Some((info, cleanup)) => {
-                    let client = io.into_client_args(
-                        info,
-                        shared.config.incoming_byte_limit,
-                        shared.config.outgoing_byte_limit,
-                        cleanup,
-                    );
+                Some((token, info)) => {
+                    let client = io.build(info, token, &shared);
 
                     let _ = shared.new_clients_send.send_async(client).await;
 
@@ -182,12 +176,7 @@ async fn handle_status(
 ) -> anyhow::Result<()> {
     io.recv_packet::<QueryRequestC2s>().await?;
 
-    match shared
-        .callbacks
-        .inner
-        .server_list_ping(&shared, remote_addr, &handshake)
-        .await
-    {
+    match server_list_ping(&shared, remote_addr, &handshake) {
         ServerListPing::Respond {
             online_players,
             max_players,
@@ -253,7 +242,7 @@ async fn handle_login(
     io: &mut PacketIo,
     remote_addr: SocketAddr,
     handshake: HandshakeData,
-) -> anyhow::Result<Option<(NewClientInfo, CleanupOnDrop)>> {
+) -> anyhow::Result<Option<(PlayerCountToken, NewClientInfo)>> {
     if handshake.protocol_version != PROTOCOL_VERSION {
         io.send_packet(&LoginDisconnectS2c {
 
@@ -295,8 +284,8 @@ async fn handle_login(
     }
 
 
-    let cleanup = match shared.callbacks.inner.login(shared, &info).await {
-        Ok(f) => CleanupOnDrop(Some(f)),
+    let player_count_token = match login(shared.clone(), &info) {
+        Ok(token) => token,
         Err(reason) => {
             info!("disconnect at login: \"{reason}\"");
             io.send_packet(&LoginDisconnectS2c {
@@ -307,8 +296,6 @@ async fn handle_login(
         }
     };
 
-
-
     io.send_packet(&LoginSuccessS2c {
         uuid: info.uuid,
         username: info.username.as_str().into(),
@@ -316,7 +303,7 @@ async fn handle_login(
     })
     .await?;
 
-    Ok(Some((info, cleanup)))
+    Ok(Some((player_count_token, info)))
 }
 
 /// Login procedure for online mode.
@@ -367,16 +354,12 @@ async fn login_online(
         .chain(&shared.public_key_der)
         .finalize();
 
-    let url = shared
-        .callbacks
-        .inner
-        .session_server(
+    let url = session_server(
             shared,
             username.as_str(),
             &auth_digest(&hash),
             &remote_addr.ip(),
-        )
-        .await;
+        );
 
     let resp = shared.http_client.get(url).send().await?;
 
