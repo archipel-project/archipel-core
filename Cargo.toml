@@ -6,5 +6,23 @@ members = [
     "crates/world_core",
     "crates/math",
     "crates/utils",
-    "crates/gen"
+    "crates/gen",
+    "crates/networking"
 ]
+
+[workspace.dependencies]
+anyhow = "1.0.82"
+tokio = { version = "1.37.0", features = ["full"] }
+flume = "0.11.0"
+tracing = "0.1.40"
+ctor = "0.2.8"
+serde = { version = "1.0.193", features = ["derive"] }
+rand = "0.8.4"
+thiserror = "1.0.59"
+uuid = "1.8.0"
+
+gen = { path = "crates/gen" }
+math = { path = "crates/math" }
+utils = { path = "crates/utils" }
+networking = { path = "crates/networking" }
+world_core = { path = "crates/world_core" }
