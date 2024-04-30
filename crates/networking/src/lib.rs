@@ -29,7 +29,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use async_trait::async_trait;
 use connect::do_accept_loop;
 pub use connect::HandshakeData;
 use flume::{Receiver, Sender};
