@@ -9,33 +9,43 @@ use base64::prelude::*;
 use hmac::digest::Update;
 use hmac::{Hmac, Mac};
 use num_bigint::BigInt;
+use protocol::packets::handshaking::HandshakeC2S;
+use protocol::packets::handshaking::HandshakeNextState;
+use protocol::packets::login::{
+    LoginCompressionS2c, LoginDisconnectS2c, LoginHelloC2s, LoginHelloS2c, LoginKeyC2s,
+    LoginQueryRequestS2c, LoginQueryResponseC2s, LoginSuccessS2c,
+};
+use protocol::packets::status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c};
+use protocol::packets::types::profile::Property;
+use protocol::packets::types::VarInt;
+use protocol::types::impls::raw::RawBytes;
+use protocol::Decode;
+use protocol::MINECRAFT_VERSION;
+use protocol::{PacketDecoder, PacketEncoder, PROTOCOL_VERSION};
 use reqwest::StatusCode;
 use rsa::Pkcs1v15Encrypt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use sha2::digest::KeyInit;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 use valence_lang::keys;
-use valence_protocol::{Decode, ident, PacketDecoder, PacketEncoder, Property, PROTOCOL_VERSION, RawBytes, VarInt};
-use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
-use valence_protocol::packets::handshaking::HandshakeC2s;
-use valence_protocol::packets::login::{LoginCompressionS2c, LoginDisconnectS2c, LoginHelloC2s, LoginHelloS2c, LoginKeyC2s, LoginQueryRequestS2c, LoginQueryResponseC2s, LoginSuccessS2c};
-use valence_protocol::packets::status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c};
 use valence_text::{Color, IntoText, Text};
-use valence_protocol::MINECRAFT_VERSION;
 
+pub use ident::ident;
+
+use crate::client::Properties;
 use crate::legacy_ping::try_handle_legacy_ping;
 use crate::packet_io::PacketIo;
-use crate::{ConnectionMode, login, NewClientInfo, PlayerCountToken, server_list_ping, ServerListPing, session_server, SharedNetworkState};
-use crate::client::Properties;
+use crate::{
+    login, server_list_ping, session_server, ConnectionMode, NewClientInfo, PlayerCountToken,
+    ServerListPing, SharedNetworkState,
+};
 
 /// Accepts new connections to the server as they occur.
 pub(super) async fn do_accept_loop(shared: SharedNetworkState) {
-
     info!("listening for incoming connections in {MINECRAFT_VERSION} mode");
     let listener = match TcpListener::bind(shared.config.address).await {
         Ok(listener) => listener,
@@ -127,15 +137,13 @@ async fn handle_handshake(
     mut io: PacketIo,
     remote_addr: SocketAddr,
 ) -> anyhow::Result<()> {
-
-
-    let handshake = io.recv_packet::<HandshakeC2s>().await?;
+    let handshake = io.recv_packet::<HandshakeC2S>().await?;
 
     let next_state = handshake.next_state;
 
     let handshake = HandshakeData {
         protocol_version: handshake.protocol_version.0,
-        server_address: handshake.server_address.to_owned(),
+        server_address: handshake.server_address.0.to_owned(),
         server_port: handshake.server_port,
     };
 
@@ -245,8 +253,6 @@ async fn handle_login(
 ) -> anyhow::Result<Option<(PlayerCountToken, NewClientInfo)>> {
     if handshake.protocol_version != PROTOCOL_VERSION {
         io.send_packet(&LoginDisconnectS2c {
-
-
             // TODO: use correct translation key.
             reason: format!("Mismatched Minecraft version (server is on {MINECRAFT_VERSION})")
                 .color(Color::RED)
@@ -262,7 +268,7 @@ async fn handle_login(
         profile_id: _, // TODO
     } = io.recv_packet().await?;
 
-    let username = username.to_owned();
+    let username = username.0.to_owned();
 
     let info = match &shared.config.connection_mode {
         ConnectionMode::Online { .. } => login_online(shared, io, remote_addr, username).await?,
@@ -273,16 +279,14 @@ async fn handle_login(
         ConnectionMode::Velocity { secret } => login_velocity(io, username, secret).await?,
     };
 
-
-    if let Some(threshold) = shared.config.compression_threshold {
+    if shared.config.compression_threshold.0 > 0 {
         io.send_packet(&LoginCompressionS2c {
-            threshold: (threshold as i32).into(),
+            threshold: shared.config.compression_threshold.0.into(),
         })
         .await?;
 
         io.set_compression(shared.config.compression_threshold);
     }
-
 
     let player_count_token = match login(shared.clone(), &info) {
         Ok(token) => token,
@@ -355,11 +359,11 @@ async fn login_online(
         .finalize();
 
     let url = session_server(
-            shared,
-            username.as_str(),
-            &auth_digest(&hash),
-            &remote_addr.ip(),
-        );
+        shared,
+        username.as_str(),
+        &auth_digest(&hash),
+        &remote_addr.ip(),
+    );
 
     let resp = shared.http_client.get(url).send().await?;
 

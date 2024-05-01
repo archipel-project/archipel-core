@@ -1,8 +1,9 @@
+use bytes::{Bytes, BytesMut};
+use protocol::packets::types::profile::Property;
+use protocol::PacketEncoder;
 use std::net::IpAddr;
 use std::time::Instant;
-use bytes::{Bytes, BytesMut};
 use uuid::Uuid;
-use valence_protocol::{PacketEncoder, Property};
 
 //todo change that to be components in the ECS
 pub struct PrimitiveClientComponents {

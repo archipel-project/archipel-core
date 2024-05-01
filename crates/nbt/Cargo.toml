@@ -1,0 +1,26 @@
+[package]
+name = "nbt"
+description = "Minecraft's Named Binary Tag (NBT) format."
+keywords = ["nbt", "minecraft", "serialization"]
+
+[features]
+binary = ["dep:byteorder", "dep:cesu8"]
+java_string = ["dep:java_string"]
+snbt = []
+# When enabled, the order of fields in compounds are preserved.
+preserve_order = ["dep:indexmap"]
+serde = ["dep:serde", "dep:thiserror", "indexmap?/serde"]
+
+[dependencies]
+byteorder = { workspace = true, optional = true }
+cesu8 = { workspace = true, optional = true }
+indexmap = { workspace = true, optional = true }
+java_string = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+ident = { workspace = true, optional = true }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+serde_json.workspace = true

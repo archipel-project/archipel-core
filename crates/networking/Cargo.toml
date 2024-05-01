@@ -4,19 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-valence_protocol = { version = "0.2.0-alpha.1+mc.1.20.1", features = ["compression", "encryption"] }
-valence_text = "0.2.0-alpha.1+mc.1.20.1"
+protocol.workspace = true
+valence_text.workspace = true
 valence_lang = "0.2.0-alpha.1+mc.1.20.1"
+ident.workspace = true
 rsa = "0.9.6"
 rsa-der = "0.3.0"
 bytes = "1.6.0"
-base64 = "0.21.7"
-hmac = "0.13.0-pre.3"
+base64 = "0.22.1"
+hmac = "0.12.1"
 reqwest = { version = "0.12.4", features = ["json"] }
 serde_json = "1.0.109"
-sha1 = "0.11.0-pre.3"
+sha1 = "0.10.6"
 num-bigint = "0.4.4"
-sha2 = "0.11.0-pre.3"
+sha2 = "0.10.8"
 image = "0.25.1"
 
 flume.workspace = true

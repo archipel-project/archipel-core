@@ -1,0 +1,11 @@
+[package]
+name = "java_string"
+description = "An implementation of Java strings, tolerant of invalid UTF-16 encoding"
+version = "0.1.2"
+keywords = ["java", "string", "utf16"]
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
