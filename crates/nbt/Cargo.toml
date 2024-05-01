@@ -2,6 +2,7 @@
 name = "nbt"
 description = "Minecraft's Named Binary Tag (NBT) format."
 keywords = ["nbt", "minecraft", "serialization"]
+edition.workspace = true
 
 [features]
 binary = ["dep:byteorder", "dep:cesu8"]

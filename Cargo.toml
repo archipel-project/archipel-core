@@ -1,6 +1,9 @@
+[workspace.package]
+edition = "2021"
+
 [workspace]
 resolver = "2"
-members = ["server", "client", "crates/*"]
+members = ["projects/*", "crates/*"]
 
 [workspace.dependencies]
 anyhow = "1.0.82"

@@ -3,11 +3,11 @@ use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::{fmt, ops};
 
+use ident::Ident;
+use nbt::Value;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
-use valence_ident::Ident;
-use valence_nbt::Value;
 
 pub mod color;
 mod into_text;

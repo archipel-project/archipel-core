@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 use valence_lang::keys;
 use valence_text::{Color, IntoText, Text};
