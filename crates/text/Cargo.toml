@@ -1,0 +1,12 @@
+[package]
+name = "text"
+description = "Parsing and writing Minecraft's JSON text format"
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["serde"] }
+ident.workspace = true
+nbt.workspace = true

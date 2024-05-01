@@ -13,15 +13,14 @@
     trivial_numeric_casts,
     unused_lifetimes,
     unused_import_braces,
-    unreachable_pub,
     clippy::dbg_macro
 )]
 
 mod byte_channel;
+pub mod client;
 mod connect;
 mod legacy_ping;
 mod packet_io;
-pub mod client;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroUsize;
@@ -29,10 +28,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::client::{PrimitiveClientComponents, Properties};
 use connect::do_accept_loop;
 pub use connect::HandshakeData;
 use flume::{Receiver, Sender};
 pub use legacy_ping::{ServerListLegacyPingPayload, ServerListLegacyPingResponse};
+use protocol::{CompressionThreshold, MINECRAFT_VERSION, PROTOCOL_VERSION};
 use rand::rngs::OsRng;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
@@ -42,15 +43,14 @@ use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
 use tracing::error;
 use uuid::Uuid;
-use valence_protocol::{CompressionThreshold, MINECRAFT_VERSION, PROTOCOL_VERSION};
-use valence_protocol::text::IntoText;
-use valence_text::Text;
-use crate::client::{PrimitiveClientComponents, Properties};
+use valence_text::{IntoText, Text};
 
 //this crate obviously come from valence_network, it has been renamed for our needs, but it came form a good old copy-paste
 
-pub fn build_plugin(config: NetworkConfig, runtime: Arc<Runtime>) -> anyhow::Result<Receiver<PrimitiveClientComponents>> {
-
+pub fn build_plugin(
+    config: NetworkConfig,
+    runtime: Arc<Runtime>,
+) -> anyhow::Result<Receiver<PrimitiveClientComponents>> {
     let (new_clients_send, new_clients_recv) = flume::bounded(64);
 
     let rsa_key = RsaPrivateKey::new(&mut OsRng, 1024)?;
@@ -120,7 +120,6 @@ pub struct NetworkConfig {
     /// [`ConnectionMode::Online`]
     pub connection_mode: ConnectionMode,
 
-
     pub broadcast_to_lan: BroadcastToLan,
     /// The maximum capacity (in bytes) of the buffer used to hold incoming
     /// packet data.
@@ -149,7 +148,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            compression_threshold: Some(256),
+            compression_threshold: CompressionThreshold(256),
             max_connections: NonZeroUsize::new(512).unwrap(),
             max_players: NonZeroUsize::new(20).unwrap(),
             address: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 25565).into(),
@@ -217,7 +216,6 @@ fn server_list_ping(
 ) -> ServerListPing<'static> {
     #![allow(unused_variables)]
 
-
     ServerListPing::Respond {
         online_players: shared.player_count.load(Ordering::Relaxed) as i32,
         max_players: shared.config.max_players.get() as i32,
@@ -257,8 +255,7 @@ fn server_list_legacy_ping(
         _ => HandshakeData::default(),
     };
 
-    match server_list_ping(shared, remote_addr, &handshake_data)
-    {
+    match server_list_ping(shared, remote_addr, &handshake_data) {
         ServerListPing::Respond {
             online_players,
             max_players,
@@ -276,9 +273,8 @@ fn server_list_legacy_ping(
     }
 }
 
-
 ///this token is used to count the number of players on the server, creating a new token increases the player count, and dropping it decreases the player count
-struct PlayerCountToken{
+struct PlayerCountToken {
     shared: SharedNetworkState,
 }
 
@@ -286,13 +282,17 @@ impl PlayerCountToken {
     fn new(shared: SharedNetworkState) -> Option<Self> {
         let max_players = shared.config.max_players.get();
 
-        shared.player_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            if count < max_players {
-                Some(count + 1)
-            } else {
-                None
-            }
-        }).ok().map(|_| Self { shared })
+        shared
+            .player_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                if count < max_players {
+                    Some(count + 1)
+                } else {
+                    None
+                }
+            })
+            .ok()
+            .map(|_| Self { shared })
     }
 }
 
@@ -316,10 +316,7 @@ impl Drop for PlayerCountToken {
 /// necessarily spawned into the world after a successful login.
 ///
 /// # Default Implementation
-fn login(
-    shared: SharedNetworkState,
-    info: &NewClientInfo,
-) -> Result<PlayerCountToken, Text> {
+fn login(shared: SharedNetworkState, info: &NewClientInfo) -> Result<PlayerCountToken, Text> {
     let _ = info; //could be used later
 
     // TODO: use correct translation key.
@@ -351,8 +348,8 @@ fn session_server(
 ) -> String {
     if shared.config.connection_mode
         == (ConnectionMode::Online {
-        prevent_proxy_connections: true,
-    })
+            prevent_proxy_connections: true,
+        })
     {
         format!("https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={auth_digest}&ip={player_ip}")
     } else {
@@ -494,7 +491,6 @@ pub struct PlayerSampleEntry {
     /// The player UUID.
     pub id: Uuid,
 }
-
 
 /// This function is broadcast every 1.5 seconds a packet over the
 /// local network in order to advertise the server to the multiplayer

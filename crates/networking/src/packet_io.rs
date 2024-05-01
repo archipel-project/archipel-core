@@ -1,20 +1,21 @@
+use anyhow::bail;
+use bytes::BytesMut;
+use protocol::{
+    CompressionThreshold, Decode, Encode, Packet, PacketDecoder, PacketEncoder, PacketFrame,
+};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{io, mem};
-use anyhow::bail;
-use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
-use valence_protocol::{CompressionThreshold, Decode, Encode, Packet, PacketDecoder, PacketEncoder};
-use valence_protocol::decode::PacketFrame;
 
 use crate::byte_channel::{byte_channel, ByteSender, TrySendError};
+use crate::client::{ClientConnection, PrimitiveClientComponents, ReceivedPacket};
 use crate::{NewClientInfo, PlayerCountToken, SharedNetworkStateInner};
-use crate::client::{PrimitiveClientComponents, ClientConnection, ReceivedPacket};
 
 pub(crate) struct PacketIo {
     stream: TcpStream,
@@ -88,11 +89,13 @@ impl PacketIo {
         info: NewClientInfo,
         player_count_token: PlayerCountToken,
         shared: &SharedNetworkStateInner,
-
     ) -> PrimitiveClientComponents {
         let (incoming_sender, incoming_receiver) = flume::unbounded();
 
-        let incoming_byte_limit = shared.config.incoming_byte_limit.min(Semaphore::MAX_PERMITS);
+        let incoming_byte_limit = shared
+            .config
+            .incoming_byte_limit
+            .min(Semaphore::MAX_PERMITS);
 
         let recv_sem = Arc::new(Semaphore::new(incoming_byte_limit));
         let recv_sem_clone = recv_sem.clone();
@@ -166,7 +169,8 @@ impl PacketIo {
             }
         });
 
-        let (outgoing_sender, mut outgoing_receiver) = byte_channel(shared.config.outgoing_byte_limit);
+        let (outgoing_sender, mut outgoing_receiver) =
+            byte_channel(shared.config.outgoing_byte_limit);
 
         let writer_task = tokio::spawn(async move {
             loop {
@@ -227,7 +231,6 @@ impl ClientConnection for RealClientConnection {
     }
 
     fn try_recv(&mut self) -> anyhow::Result<Option<ReceivedPacket>> {
-
         match self.recv.try_recv() {
             Ok(packet) => {
                 let cost = mem::size_of::<ReceivedPacket>() + packet.body.len();
